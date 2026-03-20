@@ -1,0 +1,164 @@
+[
+  {
+    "name": "boris",
+    "host": "localhost",
+    "port": 8028,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "boxen",
+    "host": "localhost",
+    "port": 9100,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "brex",
+    "host": "localhost",
+    "port": 8030,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "bunpu",
+    "host": "localhost",
+    "port": 8062,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "dexlake",
+    "host": "localhost",
+    "port": 8666,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "finalyzer",
+    "host": "localhost",
+    "port": 9200,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "governor",
+    "host": "localhost",
+    "port": 8007,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "holdings",
+    "host": "localhost",
+    "port": 8009,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "irma-v2",
+    "host": "localhost",
+    "port": 8015,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "irma-v3",
+    "host": "localhost",
+    "port": 8017,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "jamboree",
+    "host": "localhost",
+    "port": 8020,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "kafka",
+    "host": "localhost",
+    "port": 8016,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "mailgun",
+    "host": "localhost",
+    "port": 8011,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "monitor",
+    "host": "localhost",
+    "port": 8005,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "poseidon",
+    "host": "localhost",
+    "port": 8021,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "soapbox",
+    "host": "localhost",
+    "port": 8010,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "sterling",
+    "host": "localhost",
+    "port": 8066,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  },
+  {
+    "name": "trade",
+    "host": "localhost",
+    "port": 8004,
+    "user": "postgres",
+    "password": "qwerty",
+    "dbname": "postgres",
+    "sslmode": "disable"
+  }
+]

@@ -35,12 +35,34 @@
 
 ## Build
 
+### Prerequisites (Ubuntu/Debian)
+
+```bash
+sudo apt install -y gcc libgl1-mesa-dev xorg-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
+```
+
+### Prerequisites (Fedora/RHEL)
+
+```bash
+sudo dnf install -y gcc mesa-libGL-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel libXxf86vm-devel
+```
+
+### Prerequisites (macOS)
+
+Xcode command line tools only — no extra packages needed:
+
+```bash
+xcode-select --install
+```
+
+### Compile and run
+
 ```bash
 go build -o helios .
 ./helios
 ```
 
-Requires Go 1.24+ and a C compiler (for Fyne's OpenGL bindings).
+Requires Go 1.24+.
 
 ## License
 
