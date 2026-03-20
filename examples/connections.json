@@ -144,15 +144,6 @@
     "sslmode": "disable"
   },
   {
-    "name": "sterling",
-    "host": "localhost",
-    "port": 8066,
-    "user": "postgres",
-    "password": "qwerty",
-    "dbname": "postgres",
-    "sslmode": "disable"
-  },
-  {
     "name": "trade",
     "host": "localhost",
     "port": 8004,
