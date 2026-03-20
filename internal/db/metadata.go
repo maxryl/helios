@@ -2,7 +2,7 @@ package db
 
 import (
 	"context"
-	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -17,6 +17,7 @@ type SchemaMeta struct {
 	Name      string
 	Tables    []TableMeta
 	Functions []string
+	Loaded    bool // true once tables+functions have been fetched
 }
 
 // TableMeta holds metadata for a single table.
@@ -26,6 +27,7 @@ type TableMeta struct {
 	Indexes     []string
 	Constraints []string
 	Triggers    []string
+	Loaded      bool // true once columns/indexes/etc. have been fetched
 }
 
 // ColumnMeta holds metadata for a single column.
@@ -37,54 +39,8 @@ type ColumnMeta struct {
 
 const excludedSchemas = `('pg_catalog', 'information_schema', 'pg_toast')`
 
-// FetchDatabaseMeta queries PostgreSQL system catalogs and returns the full
-// schema tree for the connected database.
-func FetchDatabaseMeta(ctx context.Context, pool *pgxpool.Pool) (*DatabaseMeta, error) {
-	schemas, err := fetchSchemas(ctx, pool)
-	if err != nil {
-		return nil, fmt.Errorf("db: fetch schemas: %w", err)
-	}
-
-	// Index schemas by name for easy lookup.
-	schemaMap := make(map[string]*SchemaMeta, len(schemas))
-	meta := &DatabaseMeta{Schemas: schemas}
-	for i := range meta.Schemas {
-		schemaMap[meta.Schemas[i].Name] = &meta.Schemas[i]
-	}
-
-	if err := fetchTables(ctx, pool, schemaMap); err != nil {
-		return nil, fmt.Errorf("db: fetch tables: %w", err)
-	}
-
-	// Build table index: schema.table -> *TableMeta
-	tableMap := make(map[string]*TableMeta)
-	for i := range meta.Schemas {
-		for j := range meta.Schemas[i].Tables {
-			key := meta.Schemas[i].Name + "." + meta.Schemas[i].Tables[j].Name
-			tableMap[key] = &meta.Schemas[i].Tables[j]
-		}
-	}
-
-	if err := fetchColumns(ctx, pool, tableMap); err != nil {
-		return nil, fmt.Errorf("db: fetch columns: %w", err)
-	}
-	if err := fetchIndexes(ctx, pool, tableMap); err != nil {
-		return nil, fmt.Errorf("db: fetch indexes: %w", err)
-	}
-	if err := fetchConstraints(ctx, pool, tableMap); err != nil {
-		return nil, fmt.Errorf("db: fetch constraints: %w", err)
-	}
-	if err := fetchTriggers(ctx, pool, tableMap); err != nil {
-		return nil, fmt.Errorf("db: fetch triggers: %w", err)
-	}
-	if err := fetchFunctions(ctx, pool, schemaMap); err != nil {
-		return nil, fmt.Errorf("db: fetch functions: %w", err)
-	}
-
-	return meta, nil
-}
-
-func fetchSchemas(ctx context.Context, pool *pgxpool.Pool) ([]SchemaMeta, error) {
+// FetchSchemas returns the list of user schemas (fast — single lightweight query).
+func FetchSchemas(ctx context.Context, pool *pgxpool.Pool) ([]SchemaMeta, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT schema_name FROM information_schema.schemata
 		 WHERE schema_name NOT IN `+excludedSchemas+`
@@ -105,148 +61,182 @@ func fetchSchemas(ctx context.Context, pool *pgxpool.Pool) ([]SchemaMeta, error)
 	return schemas, rows.Err()
 }
 
-func fetchTables(ctx context.Context, pool *pgxpool.Pool, schemas map[string]*SchemaMeta) error {
+// FetchSchemaContent populates tables and functions for a single schema.
+func FetchSchemaContent(ctx context.Context, pool *pgxpool.Pool, schema *SchemaMeta) error {
+	// Tables
 	rows, err := pool.Query(ctx,
-		`SELECT table_schema, table_name FROM information_schema.tables
-		 WHERE table_schema NOT IN `+excludedSchemas+`
-		 AND table_type = 'BASE TABLE'
-		 ORDER BY table_schema, table_name`)
+		`SELECT table_name FROM information_schema.tables
+		 WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+		 ORDER BY table_name`, schema.Name)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
+	schema.Tables = nil
 	for rows.Next() {
-		var schema, table string
-		if err := rows.Scan(&schema, &table); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return err
 		}
-		if s, ok := schemas[schema]; ok {
-			s.Tables = append(s.Tables, TableMeta{Name: table})
-		}
+		schema.Tables = append(schema.Tables, TableMeta{Name: name})
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Functions
+	rows2, err := pool.Query(ctx,
+		`SELECT p.proname || '(' || COALESCE(pg_get_function_arguments(p.oid), '') || ')'
+		 FROM pg_proc p
+		 JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = $1 AND p.prokind = 'f'
+		 ORDER BY 1`, schema.Name)
+	if err != nil {
+		return err
+	}
+	defer rows2.Close()
+
+	schema.Functions = nil
+	for rows2.Next() {
+		var name string
+		if err := rows2.Scan(&name); err != nil {
+			return err
+		}
+		schema.Functions = append(schema.Functions, name)
+	}
+	if err := rows2.Err(); err != nil {
+		return err
+	}
+
+	schema.Loaded = true
+	return nil
 }
 
-func fetchColumns(ctx context.Context, pool *pgxpool.Pool, tables map[string]*TableMeta) error {
+// FetchTableDetail populates columns, indexes, constraints, and triggers for a single table.
+func FetchTableDetail(ctx context.Context, pool *pgxpool.Pool, schemaName string, table *TableMeta) error {
+	// Columns
 	rows, err := pool.Query(ctx,
-		`SELECT table_schema, table_name, column_name, data_type, is_nullable
+		`SELECT column_name, data_type, is_nullable
 		 FROM information_schema.columns
-		 WHERE table_schema NOT IN `+excludedSchemas+`
-		 ORDER BY table_schema, table_name, ordinal_position`)
+		 WHERE table_schema = $1 AND table_name = $2
+		 ORDER BY ordinal_position`, schemaName, table.Name)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
+	table.Columns = nil
 	for rows.Next() {
-		var schema, table, col, dtype, nullable string
-		if err := rows.Scan(&schema, &table, &col, &dtype, &nullable); err != nil {
+		var col, dtype, nullable string
+		if err := rows.Scan(&col, &dtype, &nullable); err != nil {
 			return err
 		}
-		key := schema + "." + table
-		if t, ok := tables[key]; ok {
-			t.Columns = append(t.Columns, ColumnMeta{
-				Name:     col,
-				DataType: dtype,
-				Nullable: nullable == "YES",
-			})
-		}
+		table.Columns = append(table.Columns, ColumnMeta{
+			Name: col, DataType: dtype, Nullable: nullable == "YES",
+		})
 	}
-	return rows.Err()
-}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
-func fetchIndexes(ctx context.Context, pool *pgxpool.Pool, tables map[string]*TableMeta) error {
-	rows, err := pool.Query(ctx,
-		`SELECT schemaname, tablename, indexname FROM pg_indexes
-		 WHERE schemaname NOT IN `+excludedSchemas+`
-		 ORDER BY schemaname, tablename, indexname`)
+	// Indexes
+	rows2, err := pool.Query(ctx,
+		`SELECT indexname FROM pg_indexes
+		 WHERE schemaname = $1 AND tablename = $2
+		 ORDER BY indexname`, schemaName, table.Name)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer rows2.Close()
 
-	for rows.Next() {
-		var schema, table, idx string
-		if err := rows.Scan(&schema, &table, &idx); err != nil {
+	table.Indexes = nil
+	for rows2.Next() {
+		var name string
+		if err := rows2.Scan(&name); err != nil {
 			return err
 		}
-		key := schema + "." + table
-		if t, ok := tables[key]; ok {
-			t.Indexes = append(t.Indexes, idx)
-		}
+		table.Indexes = append(table.Indexes, name)
 	}
-	return rows.Err()
-}
+	if err := rows2.Err(); err != nil {
+		return err
+	}
 
-func fetchConstraints(ctx context.Context, pool *pgxpool.Pool, tables map[string]*TableMeta) error {
-	rows, err := pool.Query(ctx,
-		`SELECT table_schema, table_name, constraint_name || ' (' || constraint_type || ')'
+	// Constraints
+	rows3, err := pool.Query(ctx,
+		`SELECT constraint_name || ' (' || constraint_type || ')'
 		 FROM information_schema.table_constraints
-		 WHERE table_schema NOT IN `+excludedSchemas+`
-		 ORDER BY table_schema, table_name, constraint_name`)
+		 WHERE table_schema = $1 AND table_name = $2
+		 ORDER BY constraint_name`, schemaName, table.Name)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer rows3.Close()
 
-	for rows.Next() {
-		var schema, table, con string
-		if err := rows.Scan(&schema, &table, &con); err != nil {
+	table.Constraints = nil
+	for rows3.Next() {
+		var name string
+		if err := rows3.Scan(&name); err != nil {
 			return err
 		}
-		key := schema + "." + table
-		if t, ok := tables[key]; ok {
-			t.Constraints = append(t.Constraints, con)
-		}
+		table.Constraints = append(table.Constraints, name)
 	}
-	return rows.Err()
+	if err := rows3.Err(); err != nil {
+		return err
+	}
+
+	// Triggers
+	rows4, err := pool.Query(ctx,
+		`SELECT trigger_name FROM information_schema.triggers
+		 WHERE trigger_schema = $1 AND event_object_table = $2
+		 ORDER BY trigger_name`, schemaName, table.Name)
+	if err != nil {
+		return err
+	}
+	defer rows4.Close()
+
+	table.Triggers = nil
+	for rows4.Next() {
+		var name string
+		if err := rows4.Scan(&name); err != nil {
+			return err
+		}
+		table.Triggers = append(table.Triggers, name)
+	}
+	if err := rows4.Err(); err != nil {
+		return err
+	}
+
+	table.Loaded = true
+	return nil
 }
 
-func fetchTriggers(ctx context.Context, pool *pgxpool.Pool, tables map[string]*TableMeta) error {
-	rows, err := pool.Query(ctx,
-		`SELECT trigger_schema, event_object_table, trigger_name
-		 FROM information_schema.triggers
-		 WHERE trigger_schema NOT IN `+excludedSchemas+`
-		 ORDER BY trigger_schema, event_object_table, trigger_name`)
+// FetchFunctionDef returns the full CREATE OR REPLACE FUNCTION definition.
+// funcSignature is "name(args)" as displayed in the tree.
+func FetchFunctionDef(ctx context.Context, pool *pgxpool.Pool, schemaName, funcSignature string) (string, error) {
+	// Extract bare name: everything before the first '('.
+	funcName := funcSignature
+	if idx := strings.Index(funcSignature, "("); idx >= 0 {
+		funcName = funcSignature[:idx]
+	}
+
+	// Match the exact overload by comparing the full signature.
+	var def string
+	err := pool.QueryRow(ctx,
+		`SELECT pg_get_functiondef(p.oid)
+		 FROM pg_proc p
+		 JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = $1
+		   AND p.proname || '(' || COALESCE(pg_get_function_arguments(p.oid), '') || ')' = $2
+		 LIMIT 1`, schemaName, funcSignature).Scan(&def)
 	if err != nil {
-		return err
+		// Fallback: match by name only (first overload).
+		err = pool.QueryRow(ctx,
+			`SELECT pg_get_functiondef(p.oid)
+			 FROM pg_proc p
+			 JOIN pg_namespace n ON n.oid = p.pronamespace
+			 WHERE n.nspname = $1 AND p.proname = $2
+			 LIMIT 1`, schemaName, funcName).Scan(&def)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var schema, table, trig string
-		if err := rows.Scan(&schema, &table, &trig); err != nil {
-			return err
-		}
-		key := schema + "." + table
-		if t, ok := tables[key]; ok {
-			t.Triggers = append(t.Triggers, trig)
-		}
-	}
-	return rows.Err()
-}
-
-func fetchFunctions(ctx context.Context, pool *pgxpool.Pool, schemas map[string]*SchemaMeta) error {
-	rows, err := pool.Query(ctx,
-		`SELECT routine_schema, routine_name
-		 FROM information_schema.routines
-		 WHERE routine_schema NOT IN `+excludedSchemas+`
-		 AND routine_type = 'FUNCTION'
-		 ORDER BY routine_schema, routine_name`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var schema, fn string
-		if err := rows.Scan(&schema, &fn); err != nil {
-			return err
-		}
-		if s, ok := schemas[schema]; ok {
-			s.Functions = append(s.Functions, fn)
-		}
-	}
-	return rows.Err()
+	return def, err
 }

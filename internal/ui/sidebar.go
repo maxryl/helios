@@ -1,16 +1,19 @@
 package ui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"image/color"
+	"io"
 	"strings"
 	"sync"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -29,31 +32,40 @@ type Sidebar struct {
 	tree      *widget.Tree
 	config    *config.AppConfig
 	connMgr   *db.ConnectionManager
-	onSelect  func(config.ConnectionConfig)
-	onEdit    func(config.ConnectionConfig)
-	onDelete  func(string)
-	container fyne.CanvasObject
+	window    fyne.Window
+	onSelect          func(config.ConnectionConfig)
+	onEdit            func(config.ConnectionConfig)
+	onDelete          func(string)
+	onOpenWithText    func(config.ConnectionConfig, string)
+	onImport          func([]config.ConnectionConfig) // import connections from JSON
+	container         fyne.CanvasObject
 
 	mu             sync.RWMutex
-	metaByID       map[string]*db.DatabaseMeta // connID -> metadata
-	lastSelectedID string                       // last selected connection ID
+	metaByID       map[string]*db.DatabaseMeta // connID -> metadata (schemas only at first)
+	lastSelectedID string
 }
 
 // NewSidebar creates a sidebar with a toolbar and schema browser tree.
 func NewSidebar(
 	cfg *config.AppConfig,
 	connMgr *db.ConnectionManager,
+	window fyne.Window,
 	onSelect func(config.ConnectionConfig),
 	onEdit func(config.ConnectionConfig),
 	onDelete func(string),
+	onOpenWithText func(config.ConnectionConfig, string),
+	onImport func([]config.ConnectionConfig),
 ) *Sidebar {
 	s := &Sidebar{
-		config:   cfg,
-		connMgr:  connMgr,
-		onSelect: onSelect,
-		onEdit:   onEdit,
-		onDelete: onDelete,
-		metaByID: make(map[string]*db.DatabaseMeta),
+		config:         cfg,
+		connMgr:        connMgr,
+		window:         window,
+		onSelect:       onSelect,
+		onEdit:         onEdit,
+		onDelete:       onDelete,
+		onOpenWithText: onOpenWithText,
+		onImport:       onImport,
+		metaByID:       make(map[string]*db.DatabaseMeta),
 	}
 
 	s.tree = widget.NewTree(
@@ -68,26 +80,75 @@ func NewSidebar(
 		connID := parts[0]
 		s.lastSelectedID = connID
 
-		// Only open terminal when clicking a connection root node.
-		if len(parts) == 1 {
+		switch {
+		case len(parts) == 1:
+			// Connection click -> open terminal
 			for _, conn := range s.config.Connections {
 				if conn.ID == connID {
 					s.onSelect(conn)
 					break
 				}
 			}
+		case len(parts) == 4 && parts[2] == "Functions":
+			// Function click -> show definition popup
+			schemaName := parts[1]
+			funcName := parts[3]
+			go s.showFunctionDetail(connID, schemaName, funcName)
 		}
 	}
 
 	s.tree.OnBranchOpened = func(uid widget.TreeNodeID) {
 		parts := strings.Split(uid, sep)
-		if len(parts) == 1 {
-			connID := parts[0]
+		connID := parts[0]
+
+		switch len(parts) {
+		case 1:
+			// Connection expanded -> connect if needed, then fetch schemas.
+			if !s.connMgr.IsConnected(connID) {
+				// Force a connection by opening a terminal.
+				for _, conn := range s.config.Connections {
+					if conn.ID == connID {
+						s.onSelect(conn)
+						break
+					}
+				}
+			}
 			s.mu.RLock()
 			_, loaded := s.metaByID[connID]
 			s.mu.RUnlock()
-			if !loaded && s.connMgr.IsConnected(connID) {
-				go s.loadMeta(connID)
+			if !loaded {
+				go s.loadSchemas(connID)
+			}
+		case 2:
+			// Schema expanded -> fetch tables + functions for this schema
+			schemaName := parts[1]
+			s.mu.RLock()
+			meta := s.metaByID[connID]
+			s.mu.RUnlock()
+			if meta != nil {
+				schema := s.findSchema(meta, schemaName)
+				if schema != nil && !schema.Loaded {
+					go s.loadSchemaContent(connID, schema)
+				}
+			}
+		case 4:
+			// Table expanded -> fetch columns/indexes/constraints/triggers
+			if parts[2] != "Tables" {
+				return
+			}
+			schemaName := parts[1]
+			tableName := parts[3]
+			s.mu.RLock()
+			meta := s.metaByID[connID]
+			s.mu.RUnlock()
+			if meta != nil {
+				schema := s.findSchema(meta, schemaName)
+				if schema != nil {
+					table := s.findTable(schema, tableName)
+					if table != nil && !table.Loaded {
+						go s.loadTableDetail(connID, schemaName, table)
+					}
+				}
 			}
 		}
 	}
@@ -113,6 +174,10 @@ func NewSidebar(
 				s.lastSelectedID = ""
 			}
 		}),
+		widget.NewToolbarSeparator(),
+		widget.NewToolbarAction(theme.DownloadIcon(), func() {
+			s.importConnections()
+		}),
 	)
 
 	header := widget.NewLabel("Connections")
@@ -124,27 +189,49 @@ func NewSidebar(
 	return s
 }
 
-func (s *Sidebar) loadMeta(connID string) {
+// loadSchemas fetches only schema names for a connection.
+func (s *Sidebar) loadSchemas(connID string) {
 	pool := s.connMgr.Pool(connID)
 	if pool == nil {
 		return
 	}
-	meta, err := db.FetchDatabaseMeta(context.Background(), pool)
+	schemas, err := db.FetchSchemas(context.Background(), pool)
 	if err != nil {
 		return
 	}
 	s.mu.Lock()
-	s.metaByID[connID] = meta
+	s.metaByID[connID] = &db.DatabaseMeta{Schemas: schemas}
 	s.mu.Unlock()
-	fyne.Do(func() {
-		s.tree.Refresh()
-	})
+	fyne.Do(func() { s.tree.Refresh() })
+}
+
+// loadSchemaContent fetches tables + functions for one schema.
+func (s *Sidebar) loadSchemaContent(connID string, schema *db.SchemaMeta) {
+	pool := s.connMgr.Pool(connID)
+	if pool == nil {
+		return
+	}
+	if err := db.FetchSchemaContent(context.Background(), pool, schema); err != nil {
+		return
+	}
+	fyne.Do(func() { s.tree.Refresh() })
+}
+
+// loadTableDetail fetches columns/indexes/constraints/triggers for one table.
+func (s *Sidebar) loadTableDetail(connID, schemaName string, table *db.TableMeta) {
+	pool := s.connMgr.Pool(connID)
+	if pool == nil {
+		return
+	}
+	if err := db.FetchTableDetail(context.Background(), pool, schemaName, table); err != nil {
+		return
+	}
+	fyne.Do(func() { s.tree.Refresh() })
 }
 
 // childUIDs returns the children of a tree node.
 func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 	if uid == "" {
-		// Root: return connection IDs.
 		ids := make([]widget.TreeNodeID, len(s.config.Connections))
 		for i, conn := range s.config.Connections {
 			ids[i] = conn.ID
@@ -161,7 +248,6 @@ func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 
 	switch len(parts) {
 	case 1:
-		// Connection node -> schemas
 		if meta == nil {
 			return nil
 		}
@@ -172,18 +258,16 @@ func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 		return ids
 
 	case 2:
-		// Schema node -> Tables, Functions
 		return []widget.TreeNodeID{
 			uid + sep + "Tables",
 			uid + sep + "Functions",
 		}
 
 	case 3:
-		// Category node (Tables or Functions)
 		schemaName := parts[1]
 		category := parts[2]
 		schema := s.findSchema(meta, schemaName)
-		if schema == nil {
+		if schema == nil || !schema.Loaded {
 			return nil
 		}
 		switch category {
@@ -202,9 +286,8 @@ func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 		}
 
 	case 4:
-		// Table node -> Columns, Indexes, Constraints, Triggers
 		if parts[2] != "Tables" {
-			return nil // Function leaf
+			return nil
 		}
 		return []widget.TreeNodeID{
 			uid + sep + "Columns",
@@ -214,7 +297,6 @@ func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 		}
 
 	case 5:
-		// Sub-category node (Columns, Indexes, etc.)
 		schemaName := parts[1]
 		tableName := parts[3]
 		subCat := parts[4]
@@ -223,15 +305,14 @@ func (s *Sidebar) childUIDs(uid widget.TreeNodeID) []widget.TreeNodeID {
 			return nil
 		}
 		table := s.findTable(schema, tableName)
-		if table == nil {
+		if table == nil || !table.Loaded {
 			return nil
 		}
 		switch subCat {
 		case "Columns":
 			ids := make([]widget.TreeNodeID, len(table.Columns))
 			for i, c := range table.Columns {
-				label := c.Name + " (" + c.DataType + ")"
-				ids[i] = uid + sep + label
+				ids[i] = uid + sep + c.Name + " (" + c.DataType + ")"
 			}
 			return ids
 		case "Indexes":
@@ -267,47 +348,30 @@ func (s *Sidebar) isBranch(uid widget.TreeNodeID) bool {
 	case 2:
 		return true // schema
 	case 3:
-		// Tables/Functions category
-		return true
+		return true // Tables/Functions category
 	case 4:
-		// Table = branch, Function = leaf
-		return parts[2] == "Tables"
+		return parts[2] == "Tables" // Table = branch, Function = leaf
 	case 5:
-		// Sub-category (Columns, Indexes, etc.)
-		return true
+		return true // Sub-category
 	default:
-		return false // leaf items (columns, indexes, etc.)
+		return false
 	}
 }
 
-// createNode creates a template tree node widget.
 func (s *Sidebar) createNode(branch bool) fyne.CanvasObject {
-	icon := canvas.NewCircle(color.Transparent)
-	icon.StrokeWidth = 2
-	label := widget.NewLabel("template")
-	return container.NewHBox(
-		container.New(&fixedSizeLayout{size: fyne.NewSquareSize(12)}, icon),
-		label,
-	)
+	return widget.NewLabel("template")
 }
 
-// updateNode updates a tree node's display based on its ID.
 func (s *Sidebar) updateNode(uid widget.TreeNodeID, branch bool, obj fyne.CanvasObject) {
-	box := obj.(*fyne.Container)
-	icon := box.Objects[0].(*fyne.Container).Objects[0].(*canvas.Circle)
-	label := box.Objects[1].(*widget.Label)
-
+	label := obj.(*widget.Label)
 	parts := strings.Split(uid, sep)
 	depth := len(parts)
 	displayName := parts[depth-1]
 
-	// Default: hide circle.
-	icon.FillColor = color.Transparent
-	icon.StrokeColor = color.Transparent
+	label.TextStyle.Bold = false
 
 	switch depth {
 	case 1:
-		// Connection node: show status circle.
 		connID := parts[0]
 		connName := connID
 		for _, conn := range s.config.Connections {
@@ -316,32 +380,122 @@ func (s *Sidebar) updateNode(uid widget.TreeNodeID, branch bool, obj fyne.Canvas
 				break
 			}
 		}
-		displayName = connName
 		if s.connMgr.IsConnected(connID) {
-			icon.FillColor = theme.Color(theme.ColorNameSuccess)
-			icon.StrokeColor = theme.Color(theme.ColorNameSuccess)
+			displayName = "● " + connName
 		} else {
-			icon.StrokeColor = theme.Color(theme.ColorNamePlaceHolder)
+			displayName = "○ " + connName
 		}
+		label.TextStyle.Bold = true
 	case 2:
-		// Schema node
 		label.TextStyle.Bold = true
 	case 3:
-		// Category (Tables, Functions)
 		label.TextStyle.Bold = true
-		displayName = fmt.Sprintf("%s", parts[2])
-	case 4:
-		label.TextStyle.Bold = false
 	case 5:
-		// Sub-category (Columns, Indexes, etc.)
 		label.TextStyle.Bold = true
-	default:
-		// Leaf
-		label.TextStyle.Bold = false
 	}
 
-	icon.Refresh()
 	label.SetText(displayName)
+}
+
+func (s *Sidebar) showFunctionDetail(connID, schemaName, funcName string) {
+	pool := s.connMgr.Pool(connID)
+	if pool == nil {
+		return
+	}
+	def, err := db.FetchFunctionDef(context.Background(), pool, schemaName, funcName)
+	if err != nil {
+		fyne.Do(func() {
+			dialog.ShowError(fmt.Errorf("failed to load function: %w", err), s.window)
+		})
+		return
+	}
+
+	fyne.Do(func() {
+		entry := widget.NewMultiLineEntry()
+		entry.SetText(def)
+		entry.TextStyle.Monospace = true
+
+		scroll := container.NewScroll(entry)
+		scroll.SetMinSize(fyne.NewSize(600, 400))
+
+		var d dialog.Dialog
+		copyBtn := widget.NewButton("Open in Terminal", func() {
+			for _, conn := range s.config.Connections {
+				if conn.ID == connID {
+					s.onOpenWithText(conn, def)
+					break
+				}
+			}
+			d.Hide()
+		})
+		copyBtn.Importance = widget.HighImportance
+
+		closeBtn := widget.NewButton("Close", func() {
+			d.Hide()
+		})
+
+		buttons := container.NewHBox(copyBtn, closeBtn)
+		content := container.NewBorder(nil, buttons, nil, nil, scroll)
+
+		d = dialog.NewCustomWithoutButtons(schemaName+"."+funcName, content, s.window)
+		d.Resize(fyne.NewSize(650, 500))
+		d.Show()
+	})
+}
+
+func (s *Sidebar) importConnections() {
+	dlg := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil || reader == nil {
+			return
+		}
+		defer reader.Close()
+
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("failed to read file: %w", err), s.window)
+			return
+		}
+
+		conns, err := parseConnectionJSON(data)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("invalid JSON: %w", err), s.window)
+			return
+		}
+
+		if len(conns) == 0 {
+			dialog.ShowInformation("Import", "No connections found in file.", s.window)
+			return
+		}
+
+		s.onImport(conns)
+		dialog.ShowInformation("Import", fmt.Sprintf("Imported %d connection(s).", len(conns)), s.window)
+	}, s.window)
+	dlg.SetFilter(storage.NewExtensionFileFilter([]string{".json"}))
+	dlg.Show()
+}
+
+// parseConnectionJSON handles both a single object and an array of objects.
+func parseConnectionJSON(data []byte) ([]config.ConnectionConfig, error) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty file")
+	}
+
+	// Try array first.
+	if data[0] == '[' {
+		var conns []config.ConnectionConfig
+		if err := json.Unmarshal(data, &conns); err != nil {
+			return nil, err
+		}
+		return conns, nil
+	}
+
+	// Try single object.
+	var conn config.ConnectionConfig
+	if err := json.Unmarshal(data, &conn); err != nil {
+		return nil, err
+	}
+	return []config.ConnectionConfig{conn}, nil
 }
 
 func (s *Sidebar) findSchema(meta *db.DatabaseMeta, name string) *db.SchemaMeta {
@@ -370,33 +524,7 @@ func (s *Sidebar) Refresh() {
 	s.tree.Refresh()
 }
 
-// SetMeta stores pre-loaded metadata for a connection.
-func (s *Sidebar) SetMeta(connID string, meta *db.DatabaseMeta) {
-	s.mu.Lock()
-	s.metaByID[connID] = meta
-	s.mu.Unlock()
-	fyne.Do(func() {
-		s.tree.Refresh()
-	})
-}
-
 // Widget returns the sidebar's top-level canvas object for embedding in layouts.
 func (s *Sidebar) Widget() fyne.CanvasObject {
 	return s.container
-}
-
-// fixedSizeLayout constrains children to a fixed size.
-type fixedSizeLayout struct {
-	size fyne.Size
-}
-
-func (l *fixedSizeLayout) MinSize(_ []fyne.CanvasObject) fyne.Size {
-	return l.size
-}
-
-func (l *fixedSizeLayout) Layout(objects []fyne.CanvasObject, _ fyne.Size) {
-	for _, o := range objects {
-		o.Move(fyne.NewPos(0, 0))
-		o.Resize(l.size)
-	}
 }

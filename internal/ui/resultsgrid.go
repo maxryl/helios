@@ -68,15 +68,23 @@ func (rg *ResultsGrid) SetData(columns []string, rows [][]string) {
 	rg.columns = columns
 	rg.rows = rows
 
+	// Compute column widths from header + sample of data rows.
 	for i, col := range rg.columns {
-		w := len(col) * 11
-		if w < 120 {
-			w = 120
+		w := len(col)
+		// Sample first 50 rows for width estimation.
+		for j := 0; j < len(rg.rows) && j < 50; j++ {
+			if i < len(rg.rows[j]) && len(rg.rows[j][i]) > w {
+				w = len(rg.rows[j][i])
+			}
 		}
-		if w > 350 {
-			w = 350
+		pw := w * 9
+		if pw < 80 {
+			pw = 80
 		}
-		rg.table.SetColumnWidth(i, float32(w))
+		if pw > 350 {
+			pw = 350
+		}
+		rg.table.SetColumnWidth(i, float32(pw))
 	}
 
 	rg.table.Refresh()

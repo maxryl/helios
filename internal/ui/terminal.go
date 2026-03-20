@@ -10,7 +10,10 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/jackc/pgx/v5"
@@ -90,6 +93,8 @@ type Terminal struct {
 	editorWidget fyne.CanvasObject // the actual widget used in layout (sqlEditor)
 	results      *ResultsGrid
 	statusLabel  *widget.Label
+	window       fyne.Window
+	history      *QueryHistory
 	pool         *pgxpool.Pool
 	tx           pgx.Tx
 	txState      TxState
@@ -104,11 +109,13 @@ type Terminal struct {
 
 // NewTerminal creates a Terminal bound to the given connection pool.
 // The onTxChange callback is invoked whenever the transaction state changes.
-func NewTerminal(pool *pgxpool.Pool, configID, configName string, onTxChange func()) *Terminal {
+func NewTerminal(pool *pgxpool.Pool, configID, configName string, window fyne.Window, history *QueryHistory, onTxChange func()) *Terminal {
 	t := &Terminal{
 		pool:       pool,
 		configID:   configID,
 		configName: configName,
+		window:     window,
+		history:    history,
 		onTxChange: onTxChange,
 	}
 
@@ -125,8 +132,18 @@ func NewTerminal(pool *pgxpool.Pool, configID, configName string, onTxChange fun
 	// Top pane: editor with completer suggestions below it.
 	editorWithCompleter := container.NewBorder(nil, t.completerHolder, nil, nil, t.editorWidget)
 
+	csvBtn := widget.NewButton("CSV", func() { t.exportAs("csv") })
+	csvBtn.Importance = widget.LowImportance
+	tsvBtn := widget.NewButton("TSV", func() { t.exportAs("tsv") })
+	tsvBtn.Importance = widget.LowImportance
+	xlsxBtn := widget.NewButton("XLSX", func() { t.exportAs("xlsx") })
+	xlsxBtn.Importance = widget.LowImportance
+
+	exportButtons := container.NewHBox(csvBtn, tsvBtn, xlsxBtn)
+
 	statusBg := canvas.NewRectangle(theme.Color(theme.ColorNameHeaderBackground))
-	statusBar := container.NewStack(statusBg, container.NewPadded(t.statusLabel))
+	statusContent := container.NewHBox(t.statusLabel, layout.NewSpacer(), exportButtons)
+	statusBar := container.NewStack(statusBg, container.NewPadded(statusContent))
 	resultsPane := container.NewBorder(statusBar, nil, nil, nil, t.results.Widget())
 	split := container.NewVSplit(editorWithCompleter, resultsPane)
 	split.SetOffset(0.3)
@@ -135,12 +152,64 @@ func NewTerminal(pool *pgxpool.Pool, configID, configName string, onTxChange fun
 	return t
 }
 
+func (t *Terminal) exportAs(format string) {
+	cols := t.results.columns
+	rows := t.results.rows
+	if len(cols) == 0 {
+		dialog.ShowInformation("No Data", "Run a query first.", t.window)
+		return
+	}
+
+	var ext string
+	switch format {
+	case "csv":
+		ext = ".csv"
+	case "tsv":
+		ext = ".tsv"
+	case "xlsx":
+		ext = ".xlsx"
+	}
+
+	dlg := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+		if err != nil || writer == nil {
+			return
+		}
+		path := writer.URI().Path()
+		writer.Close()
+
+		var exportErr error
+		switch format {
+		case "csv":
+			exportErr = ExportCSV(path, cols, rows)
+		case "tsv":
+			exportErr = ExportTSV(path, cols, rows)
+		case "xlsx":
+			exportErr = ExportXLSX(path, cols, rows)
+		}
+		if exportErr != nil {
+			fyne.Do(func() {
+				dialog.ShowError(exportErr, t.window)
+			})
+		} else {
+			fyne.Do(func() {
+				dialog.ShowInformation("Export Complete",
+					fmt.Sprintf("Saved %d rows to %s", len(rows), path), t.window)
+			})
+		}
+	}, t.window)
+
+	dlg.SetFilter(storage.NewExtensionFileFilter([]string{ext}))
+	dlg.SetFileName("export" + ext)
+	dlg.Show()
+}
+
 // Content returns the pre-built canvas object for embedding in tabs.
 func (t *Terminal) Content() fyne.CanvasObject {
 	return t.content
 }
 
 // RunQuery executes the selected text (or the full editor contents) against the database.
+// Results are streamed in batches so the UI stays responsive for large result sets.
 func (t *Terminal) RunQuery() {
 	sql := t.editor.SelectedText()
 	if sql == "" {
@@ -151,30 +220,80 @@ func (t *Terminal) RunQuery() {
 	}
 
 	t.mu.Lock()
-	// Cancel any previously running query.
 	if t.cancel != nil {
 		t.cancel()
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	querier := t.querier()
 	t.mu.Unlock()
 
 	t.statusLabel.SetText("Running...")
+	if t.history != nil {
+		t.history.Add(sql, t.configName)
+	}
 
+	if !db.IsQuerySQL(sql) {
+		// Non-SELECT: use simple exec path.
+		go func() {
+			result := db.ExecuteQuery(ctx, querier, sql)
+			fyne.Do(func() {
+				if result.Error != nil {
+					t.statusLabel.SetText(fmt.Sprintf("Error: %s", result.Error))
+				} else {
+					t.statusLabel.SetText(fmt.Sprintf("%s (%s)", result.Message, result.Duration.Round(time.Millisecond)))
+				}
+				t.results.SetData(nil, nil)
+			})
+		}()
+		return
+	}
+
+	// SELECT: stream results in batches.
 	go func() {
-		result := db.ExecuteQuery(ctx, querier, sql)
+		var allRows [][]string
+		firstBatch := true
+
+		result := db.ExecuteQueryStreaming(ctx, querier, sql, 500, func(columns []string, batch [][]string, totalSoFar int) bool {
+			allRows = append(allRows, batch...)
+
+			if firstBatch {
+				// Show first batch immediately for instant feedback.
+				firstBatch = false
+				snapshot := make([][]string, len(allRows))
+				copy(snapshot, allRows)
+				cols := columns
+				fyne.Do(func() {
+					t.results.SetData(cols, snapshot)
+					t.statusLabel.SetText(fmt.Sprintf("Loading... %d rows", totalSoFar))
+				})
+			} else {
+				// Update status during loading.
+				fyne.Do(func() {
+					t.statusLabel.SetText(fmt.Sprintf("Loading... %d rows", totalSoFar))
+				})
+			}
+			return true
+		})
+
+		// Final update with all data.
 		fyne.Do(func() {
 			if result.Error != nil {
 				t.statusLabel.SetText(fmt.Sprintf("Error: %s", result.Error))
 				t.results.SetData(nil, nil)
-			} else if len(result.Columns) > 0 {
-				t.statusLabel.SetText(fmt.Sprintf("%d rows (%s)", result.RowCount, result.Duration.Round(time.Millisecond)))
-				t.results.SetData(result.Columns, result.Rows)
+				return
+			}
+
+			if result.RowCount > 0 {
+				t.results.SetData(result.Columns, allRows)
+				status := fmt.Sprintf("%d rows (%s)", result.RowCount, result.Duration.Round(time.Millisecond))
+				if result.Truncated {
+					status += fmt.Sprintf(" — limited to %d rows", db.MaxRows)
+				}
+				t.statusLabel.SetText(status)
 			} else {
-				t.statusLabel.SetText(fmt.Sprintf("%s (%s)", result.Message, result.Duration.Round(time.Millisecond)))
 				t.results.SetData(nil, nil)
+				t.statusLabel.SetText(fmt.Sprintf("0 rows (%s)", result.Duration.Round(time.Millisecond)))
 			}
 		})
 	}()

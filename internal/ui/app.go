@@ -14,14 +14,16 @@ import (
 
 // App is the top-level Helios application window.
 type App struct {
-	fyneApp fyne.App
-	window  fyne.Window
-	config  *config.AppConfig
-	cfgPath string
-	connMgr *db.ConnectionManager
-	tabs    *TerminalTabs
-	toolbar *Toolbar
-	sidebar *Sidebar
+	fyneApp     fyne.App
+	window      fyne.Window
+	config      *config.AppConfig
+	cfgPath     string
+	connMgr     *db.ConnectionManager
+	tabs        *TerminalTabs
+	toolbar     *Toolbar
+	sidebar     *Sidebar
+	fileBrowser *FileBrowser
+	history     *QueryHistory
 }
 
 // NewApp creates the main Helios window with menus, shortcuts, and a tab container.
@@ -34,9 +36,10 @@ func NewApp(fyneApp fyne.App, cfg *config.AppConfig, cfgPath string, connMgr *db
 	}
 
 	a.window = fyneApp.NewWindow("Helios")
-	a.tabs = NewTerminalTabs(connMgr)
+	a.history = NewQueryHistory(cfgPath)
+	a.tabs = NewTerminalTabs(connMgr, a.window, a.history)
 
-	a.sidebar = NewSidebar(cfg, connMgr,
+	a.sidebar = NewSidebar(cfg, connMgr, a.window,
 		// onSelect: open a new terminal tab for the chosen connection.
 		func(cc config.ConnectionConfig) {
 			if err := a.tabs.NewTerminal(context.Background(), cc); err != nil {
@@ -81,11 +84,38 @@ func NewApp(fyneApp fyne.App, cfg *config.AppConfig, cfgPath string, connMgr *db
 				a.sidebar.Refresh()
 			}, a.window)
 		},
+		// onOpenWithText: open a new terminal and paste text into the editor.
+		func(cc config.ConnectionConfig, text string) {
+			if err := a.tabs.NewTerminalWithText(context.Background(), cc, text); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+		},
+		// onImport: add imported connections and save config.
+		func(conns []config.ConnectionConfig) {
+			for _, cc := range conns {
+				a.config.Add(cc)
+			}
+			if err := a.config.Save(a.cfgPath); err != nil {
+				dialog.ShowError(err, a.window)
+			}
+			a.sidebar.Refresh()
+		},
 	)
 
-	a.toolbar = NewToolbar(a.tabs, a.window, a.openTerminalForFirstConnection)
+	a.fileBrowser = NewFileBrowser(a.window, func(path string) {
+		a.tabs.OpenFile(path)
+	})
 
-	hsplit := container.NewHSplit(a.sidebar.Widget(), a.tabs.Widget())
+	// Sidebar with tabs for Connections and Files.
+	sidebarTabs := container.NewAppTabs(
+		container.NewTabItem("DB", a.sidebar.Widget()),
+		container.NewTabItem("Files", a.fileBrowser.Widget()),
+	)
+	sidebarTabs.SetTabLocation(container.TabLocationTop)
+
+	a.toolbar = NewToolbar(a.tabs, a.window, a.history, a.openTerminalForFirstConnection)
+
+	hsplit := NewSmoothHSplit(sidebarTabs, a.tabs.Widget())
 	hsplit.SetOffset(0.2)
 
 	content := container.NewBorder(a.toolbar.Widget(), nil, nil, nil, hsplit)
@@ -141,6 +171,16 @@ func (a *App) addShortcuts() {
 		func(_ fyne.Shortcut) {
 			if t := a.tabs.ActiveTerminal(); t != nil {
 				t.RunQuery()
+			}
+		},
+	)
+
+	// Ctrl+E: explain analyze current query.
+	canvas.AddShortcut(
+		&desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: fyne.KeyModifierControl},
+		func(_ fyne.Shortcut) {
+			if t := a.tabs.ActiveTerminal(); t != nil {
+				RunExplainAnalyze(t)
 			}
 		},
 	)

@@ -39,7 +39,7 @@ func (m *mockQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.R
 	return m.queryFn(ctx, sql, args...)
 }
 
-// --- isQuerySQL tests ------------------------------------------------------
+// --- IsQuerySQL tests ------------------------------------------------------
 
 func TestIsQuerySQL(t *testing.T) {
 	tests := []struct {
@@ -64,8 +64,8 @@ func TestIsQuerySQL(t *testing.T) {
 		{"", false},
 	}
 	for _, tt := range tests {
-		if got := isQuerySQL(tt.sql); got != tt.want {
-			t.Errorf("isQuerySQL(%q) = %v, want %v", tt.sql, got, tt.want)
+		if got := IsQuerySQL(tt.sql); got != tt.want {
+			t.Errorf("IsQuerySQL(%q) = %v, want %v", tt.sql, got, tt.want)
 		}
 	}
 }
