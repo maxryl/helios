@@ -64,6 +64,25 @@ go build -o helios .
 
 Requires Go 1.24+.
 
+## Seed Connections
+
+To quickly populate Helios with connections, use the import button (download icon in the sidebar) and select a JSON file. An example is included:
+
+```bash
+# Import the example connections after launching Helios:
+# Sidebar → click the ↓ import icon → select examples/connections.json
+```
+
+The JSON format supports a single object or an array:
+
+```json
+[
+  {"name": "my-db", "host": "localhost", "port": 5432, "user": "postgres", "password": "secret", "dbname": "mydb", "sslmode": "disable"}
+]
+```
+
+See [`examples/connections.json`](examples/connections.json) for a full example.
+
 ## License
 
 MIT
