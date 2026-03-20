@@ -127,11 +127,23 @@ func parseTableRefs(sql string) []tableRef {
 			continue
 		}
 		// The next token after a table keyword is the table name.
+		// For compound JOINs (LEFT JOIN, RIGHT OUTER JOIN, etc.),
+		// skip intermediate keywords to reach the actual table name.
 		i++
 		if i >= len(tokens) {
 			break
 		}
 		tableName := tokens[i]
+		for strings.ToUpper(tableName) == "JOIN" || strings.ToUpper(tableName) == "OUTER" || strings.ToUpper(tableName) == "NATURAL" {
+			i++
+			if i >= len(tokens) {
+				break
+			}
+			tableName = tokens[i]
+		}
+		if i >= len(tokens) {
+			break
+		}
 
 		// Check for alias: the token after table name could be AS or a plain identifier.
 		alias := ""
@@ -269,7 +281,9 @@ func NewCompleter(editor *widget.Entry, schema *db.SchemaCache) *Completer {
 		c.selected = id
 	}
 
-	c.bg = canvas.NewRectangle(theme.OverlayBackgroundColor())
+	c.bg = canvas.NewRectangle(theme.Color(theme.ColorNameMenuBackground))
+	c.bg.StrokeColor = theme.Color(theme.ColorNameInputBorder)
+	c.bg.StrokeWidth = 1
 	c.holder = container.NewStack()
 
 	return c

@@ -99,6 +99,6 @@ func ShowConnectionDialog(window fyne.Window, existing *config.ConnectionConfig,
 		onSave(cfg)
 	}, window)
 
-	dlg.Resize(fyne.NewSize(450, 400))
+	dlg.Resize(fyne.NewSize(480, 450))
 	dlg.Show()
 }

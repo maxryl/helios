@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -117,12 +119,15 @@ func NewTerminal(pool *pgxpool.Pool, configID, configName string, onTxChange fun
 
 	t.results = NewResultsGrid()
 	t.statusLabel = widget.NewLabel("Ready")
+	t.statusLabel.TextStyle.Bold = true
 	t.completerHolder = container.NewStack()
 
 	// Top pane: editor with completer suggestions below it.
 	editorWithCompleter := container.NewBorder(nil, t.completerHolder, nil, nil, t.editorWidget)
 
-	resultsPane := container.NewBorder(t.statusLabel, nil, nil, nil, t.results.Widget())
+	statusBg := canvas.NewRectangle(theme.Color(theme.ColorNameHeaderBackground))
+	statusBar := container.NewStack(statusBg, container.NewPadded(t.statusLabel))
+	resultsPane := container.NewBorder(statusBar, nil, nil, nil, t.results.Widget())
 	split := container.NewVSplit(editorWithCompleter, resultsPane)
 	split.SetOffset(0.3)
 	t.content = split

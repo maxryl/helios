@@ -1,11 +1,17 @@
 package ui
 
 import (
+	"image/color"
+
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
-// ResultsGrid displays query results in a table with bold column headers.
+// ResultsGrid displays query results in a table with bold column headers
+// and alternating row backgrounds for readability.
 type ResultsGrid struct {
 	table   *widget.Table
 	columns []string
@@ -24,17 +30,32 @@ func NewResultsGrid() *ResultsGrid {
 			return len(rg.rows) + 1, len(rg.columns)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("")
+			bg := canvas.NewRectangle(color.Transparent)
+			label := widget.NewLabel("")
+			label.Truncation = fyne.TextTruncateEllipsis
+			return container.NewStack(bg, container.NewPadded(label))
 		},
 		func(id widget.TableCellID, cell fyne.CanvasObject) {
-			label := cell.(*widget.Label)
+			stack := cell.(*fyne.Container)
+			bg := stack.Objects[0].(*canvas.Rectangle)
+			padded := stack.Objects[1].(*fyne.Container)
+			label := padded.Objects[0].(*widget.Label)
 			if id.Row == 0 {
+				// Header row: distinct background, bold text.
 				label.SetText(rg.columns[id.Col])
 				label.TextStyle.Bold = true
+				bg.FillColor = theme.Color(theme.ColorNameHeaderBackground)
 			} else {
 				label.SetText(rg.rows[id.Row-1][id.Col])
 				label.TextStyle.Bold = false
+				// Alternating row stripes for readability.
+				if id.Row%2 == 0 {
+					bg.FillColor = theme.Color(colorNameGridStripe)
+				} else {
+					bg.FillColor = color.Transparent
+				}
 			}
+			bg.Refresh()
 			label.Refresh()
 		},
 	)
@@ -47,14 +68,13 @@ func (rg *ResultsGrid) SetData(columns []string, rows [][]string) {
 	rg.columns = columns
 	rg.rows = rows
 
-	// Adjust column widths based on header length.
 	for i, col := range rg.columns {
-		w := len(col) * 10
-		if w < 100 {
-			w = 100
+		w := len(col) * 11
+		if w < 120 {
+			w = 120
 		}
-		if w > 300 {
-			w = 300
+		if w > 350 {
+			w = 350
 		}
 		rg.table.SetColumnWidth(i, float32(w))
 	}

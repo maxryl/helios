@@ -2,9 +2,10 @@ package ui
 
 import (
 	"errors"
-	"fmt"
+	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -50,19 +51,31 @@ func NewSidebar(
 			return len(s.config.Connections)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("template")
+			circle := canvas.NewCircle(color.Transparent)
+			circle.StrokeWidth = 2
+			label := widget.NewLabel("template")
+			return container.NewHBox(
+				container.New(&fixedSizeLayout{size: fyne.NewSquareSize(12)}, circle),
+				label,
+			)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			label := obj.(*widget.Label)
+			box := obj.(*fyne.Container)
+			circle := box.Objects[0].(*fyne.Container).Objects[0].(*canvas.Circle)
+			label := box.Objects[1].(*widget.Label)
 			if id >= len(s.config.Connections) {
 				return
 			}
 			conn := s.config.Connections[id]
 			if s.connMgr.IsConnected(conn.ID) {
-				label.SetText(fmt.Sprintf("● %s", conn.Name))
+				circle.FillColor = theme.Color(theme.ColorNameSuccess)
+				circle.StrokeColor = theme.Color(theme.ColorNameSuccess)
 			} else {
-				label.SetText(fmt.Sprintf("○ %s", conn.Name))
+				circle.FillColor = color.Transparent
+				circle.StrokeColor = theme.Color(theme.ColorNamePlaceHolder)
 			}
+			circle.Refresh()
+			label.SetText(conn.Name)
 		},
 	)
 
@@ -91,13 +104,17 @@ func NewSidebar(
 		}),
 	)
 
-	s.container = container.NewBorder(toolbar, nil, nil, nil, s.list)
+	header := widget.NewLabel("Connections")
+	header.TextStyle.Bold = true
+
+	rightBorder := widget.NewSeparator()
+	content := container.NewBorder(container.NewVBox(header, toolbar), nil, nil, nil, s.list)
+	s.container = container.NewBorder(nil, nil, nil, rightBorder, content)
 	return s
 }
 
 // Refresh updates the list display after configuration changes.
 func (s *Sidebar) Refresh() {
-	// Reset selection since indices may have shifted.
 	s.selected = -1
 	s.list.UnselectAll()
 	s.list.Refresh()
@@ -106,4 +123,20 @@ func (s *Sidebar) Refresh() {
 // Widget returns the sidebar's top-level canvas object for embedding in layouts.
 func (s *Sidebar) Widget() fyne.CanvasObject {
 	return s.container
+}
+
+// fixedSizeLayout constrains children to a fixed size.
+type fixedSizeLayout struct {
+	size fyne.Size
+}
+
+func (l *fixedSizeLayout) MinSize(_ []fyne.CanvasObject) fyne.Size {
+	return l.size
+}
+
+func (l *fixedSizeLayout) Layout(objects []fyne.CanvasObject, _ fyne.Size) {
+	for _, o := range objects {
+		o.Move(fyne.NewPos(0, 0))
+		o.Resize(l.size)
+	}
 }

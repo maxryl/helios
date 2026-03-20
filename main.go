@@ -12,6 +12,7 @@ import (
 
 func main() {
 	a := app.New()
+	a.Settings().SetTheme(ui.NewM3Theme())
 
 	cfg := &config.AppConfig{}
 	cfgPath, err := config.DefaultPath()

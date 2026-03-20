@@ -4,14 +4,16 @@ import (
 	"context"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
 // Toolbar provides action buttons for SQL execution and transaction management.
 type Toolbar struct {
-	toolbar       *widget.Toolbar
+	widget        fyne.CanvasObject
 	tabs          *TerminalTabs
 	window        fyne.Window
 	onNewTerminal func()
@@ -26,22 +28,42 @@ func NewToolbar(tabs *TerminalTabs, window fyne.Window, onNewTerminal func()) *T
 		onNewTerminal: onNewTerminal,
 	}
 
-	tb.toolbar = widget.NewToolbar(
-		widget.NewToolbarAction(theme.MediaPlayIcon(), tb.runQuery),
-		widget.NewToolbarSeparator(),
-		widget.NewToolbarAction(theme.MediaRecordIcon(), tb.beginTx),
-		widget.NewToolbarAction(theme.ConfirmIcon(), tb.commitTx),
-		widget.NewToolbarAction(theme.CancelIcon(), tb.rollbackTx),
-		widget.NewToolbarSeparator(),
-		widget.NewToolbarAction(theme.ContentAddIcon(), tb.newTerminal),
+	runBtn := widget.NewButtonWithIcon("Run", theme.MediaPlayIcon(), tb.runQuery)
+	runBtn.Importance = widget.HighImportance
+
+	beginBtn := widget.NewButtonWithIcon("Begin", theme.MediaRecordIcon(), tb.beginTx)
+	beginBtn.Importance = widget.MediumImportance
+
+	commitBtn := widget.NewButtonWithIcon("Commit", theme.ConfirmIcon(), tb.commitTx)
+	commitBtn.Importance = widget.MediumImportance
+
+	rollbackBtn := widget.NewButtonWithIcon("Rollback", theme.CancelIcon(), tb.rollbackTx)
+	rollbackBtn.Importance = widget.MediumImportance
+
+	newTermBtn := widget.NewButtonWithIcon("New", theme.ContentAddIcon(), tb.newTerminal)
+	newTermBtn.Importance = widget.LowImportance
+
+	buttons := container.NewHBox(
+		runBtn,
+		widget.NewSeparator(),
+		beginBtn, commitBtn, rollbackBtn,
+		widget.NewSeparator(),
+		newTermBtn,
+		layout.NewSpacer(),
+	)
+
+	separator := widget.NewSeparator()
+	tb.widget = container.NewVBox(
+		container.NewPadded(buttons),
+		separator,
 	)
 
 	return tb
 }
 
-// Widget returns the underlying toolbar widget for embedding in layouts.
-func (tb *Toolbar) Widget() *widget.Toolbar {
-	return tb.toolbar
+// Widget returns the toolbar for embedding in layouts.
+func (tb *Toolbar) Widget() fyne.CanvasObject {
+	return tb.widget
 }
 
 func (tb *Toolbar) activeOrError() *Terminal {
